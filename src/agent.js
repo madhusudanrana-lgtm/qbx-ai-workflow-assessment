@@ -49,7 +49,7 @@ async function runAgentForItem(ticket, config) {
     const llmRaw = await mockLlm(messages);
     const parsed = safeParse(llmRaw);
 
-    // 🔁 Retry if invalid JSON
+    // Retry malformed JSON
     if (!parsed.ok) {
       attempts++;
       continue;
@@ -108,14 +108,18 @@ async function runAgentForItem(ticket, config) {
       tool_calls.push({ tool, args });
       toolCallCount++;
 
+      // 🔥 FIX: Update context so LLM moves to FINAL
       messages.push({
         role: "assistant",
         content: `TOOL_RESULT: ${JSON.stringify(result)}`
       });
 
-      // 🔥 CRITICAL FIX
-      attempts++;
+      messages.push({
+        role: "user",
+        content: "Tool result received. Provide final response."
+      });
 
+      attempts++;
       continue;
     }
 
