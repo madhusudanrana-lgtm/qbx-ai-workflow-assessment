@@ -49,7 +49,7 @@ async function runAgentForItem(ticket, config) {
     const llmRaw = await mockLlm(messages);
     const parsed = safeParse(llmRaw);
 
-    // 🔁 Retry if invalid JSON
+    // Retry if JSON invalid
     if (!parsed.ok) {
       attempts++;
       continue;
@@ -75,6 +75,7 @@ async function runAgentForItem(ticket, config) {
     if (validation.type === "tool_call") {
       const { tool, args } = parsed.value;
 
+      // Allowlist check
       if (!enforceToolAllowlist(tool, ticket.context.allowed_tools)) {
         return {
           id: ticket.id,
@@ -89,6 +90,7 @@ async function runAgentForItem(ticket, config) {
         };
       }
 
+      // Tool limit check
       if (toolCallCount >= maxToolCalls) {
         return {
           id: ticket.id,
@@ -108,13 +110,13 @@ async function runAgentForItem(ticket, config) {
       tool_calls.push({ tool, args });
       toolCallCount++;
 
-      // 🔥 VERY IMPORTANT (this triggers final LLM response)
+      // 🔥 CRITICAL STEP → enables final response
       messages.push({
         role: "assistant",
         content: `TOOL_RESULT: ${JSON.stringify(result)}`
       });
 
-      attempts++;
+      // Do NOT increment attempts here (important fix)
       continue;
     }
 
@@ -131,7 +133,7 @@ async function runAgentForItem(ticket, config) {
     }
   }
 
-  // ❌ If exceeded attempts
+  // ❌ If max attempts reached
   return {
     id: ticket.id,
     status: "REJECTED",
