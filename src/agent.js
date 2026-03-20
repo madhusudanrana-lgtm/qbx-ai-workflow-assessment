@@ -18,7 +18,7 @@ async function runAgentForItem(ticket, config) {
   const tool_calls = [];
   const safety = { blocked: false, reasons: [] };
 
-  // 🔒 Prompt Injection
+  //  Prompt Injection
   const injection = detectPromptInjection(ticket.user_request);
   if (injection.length > 0) {
     return {
@@ -34,7 +34,7 @@ async function runAgentForItem(ticket, config) {
     };
   }
 
-  // 🎯 SPECIAL HANDLING FOR T1 (latest report)
+  //  SPECIAL HANDLING FOR T1 (latest report)
   if (/latest report/i.test(ticket.user_request)) {
     const tool = "lookupDoc";
 
@@ -76,7 +76,7 @@ async function runAgentForItem(ticket, config) {
     };
   }
 
-  // 🔁 DEFAULT FLOW (for T6 etc.)
+  //  DEFAULT FLOW (for T6 etc.)
   const llmRaw = await mockLlm([
     { role: "system", content: "Respond in JSON" },
     { role: "user", content: ticket.user_request }
