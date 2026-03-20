@@ -8,128 +8,58 @@ const {
 } = require("./guardrails");
 
 /**
- * runAgentForItem(ticket, config)
- *
- * config:
- *  - maxToolCalls
- *  - maxLlmAttempts
- *
- * Must return:
- * {
- *   id,
- *   status: "DONE" | "NEEDS_CLARIFICATION" | "REJECTED",
- *   plan: string[],
- *   tool_calls: { tool: string, args: object }[],
- *   final: { action: "SEND_EMAIL_DRAFT" | "REQUEST_INFO" | "REFUSE", payload: object },
- *   safety: { blocked: boolean, reasons: string[] }
- * }
+ * Main agent execution
  */
 async function runAgentForItem(ticket, config) {
   const maxToolCalls = config?.maxToolCalls ?? 3;
   const maxLlmAttempts = config?.maxLlmAttempts ?? 3;
 
-  const plan = [
-    "Review the ticket request",
-    "Check safety guardrails",
-    "Call allowed tools only if needed",
-    "Return a deterministic final action"
-  ];
-
+  const plan = ["Process ticket"];
   const tool_calls = [];
   const safety = { blocked: false, reasons: [] };
 
-  const ticketId = ticket?.id || "UNKNOWN";
-  const userRequest = ticket?.user_request || "";
-  const allowedTools = ticket?.context?.allowed_tools || [];
-
-  // 1) Prompt injection detection before any LLM/tool usage
-  const injectionIssues = detectPromptInjection(userRequest);
-  if (injectionIssues.length > 0) {
-    safety.blocked = true;
-    safety.reasons = injectionIssues;
-
+  // 1. Prompt Injection Check
+  const injection = detectPromptInjection(ticket.user_request);
+  if (injection.length > 0) {
     return {
-      id: ticketId,
+      id: ticket.id,
       status: "REJECTED",
       plan,
       tool_calls: [],
       final: {
         action: "REFUSE",
-        payload: { reason: "Prompt injection detected." }
+        payload: { reason: "Prompt injection detected" }
       },
-      safety
+      safety: { blocked: true, reasons: injection }
     };
   }
 
-  // 2) Initial messages
-  const messages = [
-    {
-      role: "system",
-      content:
-        "You are a deterministic workflow agent. Return only valid JSON matching the expected schema."
-    },
-    {
-      role: "user",
-      content: userRequest
-    }
+  // 2. Prepare LLM messages
+  let messages = [
+    { role: "system", content: "You are a controlled agent. Respond in JSON." },
+    { role: "user", content: ticket.user_request }
   ];
 
-  let llmAttempts = 0;
   let toolCallCount = 0;
-  let parseRetryUsed = false;
+  let attempts = 0;
 
-  while (llmAttempts < maxLlmAttempts) {
-    llmAttempts += 1;
-
-    let llmRaw;
-    try {
-      llmRaw = await mockLlm(messages);
-    } catch (err) {
-      return {
-        id: ticketId,
-        status: "REJECTED",
-        plan,
-        tool_calls,
-        final: {
-          action: "REFUSE",
-          payload: { reason: `LLM execution failed: ${err.message}` }
-        },
-        safety
-      };
-    }
+  // 3. Agent Loop
+  while (attempts < maxLlmAttempts) {
+    const llmRaw = await mockLlm(messages);
 
     const parsed = safeParse(llmRaw);
 
-    // malformed JSON -> retry once with stricter system message
+    // Retry if JSON malformed
     if (!parsed.ok) {
-      if (!parseRetryUsed && llmAttempts < maxLlmAttempts) {
-        parseRetryUsed = true;
-        messages.unshift({
-          role: "system",
-          content:
-            "Previous response was invalid JSON. Reply with strict JSON only. No extra text."
-        });
-        continue;
-      }
-
-      return {
-        id: ticketId,
-        status: "REJECTED",
-        plan,
-        tool_calls,
-        final: {
-          action: "REFUSE",
-          payload: { reason: "Malformed LLM output after retry." }
-        },
-        safety
-      };
+      attempts++;
+      continue;
     }
 
     const validation = validateLlmResponse(parsed.value);
 
     if (!validation.ok) {
       return {
-        id: ticketId,
+        id: ticket.id,
         status: "REJECTED",
         plan,
         tool_calls,
@@ -141,115 +71,91 @@ async function runAgentForItem(ticket, config) {
       };
     }
 
-    const response = parsed.value;
-
-    // tool call path
+    // TOOL CALL HANDLING
     if (validation.type === "tool_call") {
-      const toolName = response.tool;
-      const args = response.args || {};
+      const { tool, args } = parsed.value;
 
-      if (!enforceToolAllowlist(toolName, allowedTools)) {
-        safety.blocked = true;
-        safety.reasons.push("DISALLOWED_TOOL");
-
+      // Allowlist check
+      if (!enforceToolAllowlist(tool, ticket.context.allowed_tools)) {
         return {
-          id: ticketId,
+          id: ticket.id,
           status: "REJECTED",
           plan,
           tool_calls,
           final: {
             action: "REFUSE",
-            payload: { reason: `Tool not allowed: ${toolName}` }
+            payload: { reason: "Tool not allowed" }
           },
           safety
         };
       }
 
+      // Tool call limit check
       if (toolCallCount >= maxToolCalls) {
         return {
-          id: ticketId,
+          id: ticket.id,
           status: "REJECTED",
           plan,
           tool_calls,
           final: {
             action: "REFUSE",
-            payload: { reason: "Maximum tool calls exceeded." }
-          },
-          safety
-        };
-      }
-
-      const toolFn = TOOL_REGISTRY[toolName];
-      if (typeof toolFn !== "function") {
-        return {
-          id: ticketId,
-          status: "REJECTED",
-          plan,
-          tool_calls,
-          final: {
-            action: "REFUSE",
-            payload: { reason: `Unknown tool requested: ${toolName}` }
+            payload: { reason: "Tool call limit exceeded" }
           },
           safety
         };
       }
 
       try {
-        const toolResult = await toolFn(args);
+        const result = TOOL_REGISTRY[tool](args);
 
-        tool_calls.push({
-          tool: toolName,
-          args
-        });
-        toolCallCount += 1;
+        tool_calls.push({ tool, args });
+        toolCallCount++;
 
+        // Feed tool result back to LLM
         messages.push({
           role: "assistant",
-          content: `TOOL_RESULT: ${JSON.stringify({
-            tool: toolName,
-            result: toolResult
-          })}`
+          content: `TOOL_RESULT: ${JSON.stringify(result)}`
         });
-
-        continue;
-      } catch (err) {
+      } catch (error) {
         return {
-          id: ticketId,
+          id: ticket.id,
           status: "REJECTED",
           plan,
           tool_calls,
           final: {
             action: "REFUSE",
-            payload: { reason: `Tool execution failed: ${err.message}` }
+            payload: { reason: "Tool execution failed" }
           },
           safety
         };
       }
+
+      attempts++;
+      continue;
     }
 
-    // final path
+    // FINAL RESPONSE
     if (validation.type === "final") {
-      const action = response.final.action;
-
       return {
-        id: ticketId,
-        status: action === "REQUEST_INFO" ? "DONE" : "DONE",
+        id: ticket.id,
+        status: "DONE",
         plan,
         tool_calls,
-        final: response.final,
+        final: parsed.value.final,
         safety
       };
     }
   }
 
+  // Max attempts reached
   return {
-    id: ticketId,
+    id: ticket.id,
     status: "REJECTED",
     plan,
     tool_calls,
     final: {
       action: "REFUSE",
-      payload: { reason: "Maximum LLM attempts exceeded." }
+      payload: { reason: "Max attempts reached" }
     },
     safety
   };
@@ -258,79 +164,3 @@ async function runAgentForItem(ticket, config) {
 module.exports = {
   runAgentForItem
 };
-/*const { mockLlm } = require("./llm/mockLlm");
-const { safeParse } = require("./llm/schema");
-const { TOOL_REGISTRY } = require("./tools/tools");
-const {
-  detectPromptInjection,
-  enforceToolAllowlist,
-  validateLlmResponse
-} = require("./guardrails");
-
-/**
- * runAgentForItem(ticket, config)
- *
- * config:
- *  - maxToolCalls
- *  - maxLlmAttempts
- *
- * Must return:
- * {
- *   id,
- *   status: "DONE" | "NEEDS_CLARIFICATION" | "REJECTED",
- *   plan: string[],
- *   tool_calls: { tool: string, args: object }[],
- *   final: { action: "SEND_EMAIL_DRAFT" | "REQUEST_INFO" | "REFUSE", payload: object },
- *   safety: { blocked: boolean, reasons: string[] }
- * }
- *
- * Behavior enforced by tests:
- * - Prompt injection in ticket.user_request => REJECTED, safety.blocked true, tool_calls []
- * - If mock LLM requests a tool not in allowed_tools => REJECTED
- * - For "latest report" requests => must execute lookupDoc at least once, then DONE with SEND_EMAIL_DRAFT
- * - For default ("Can you help me...") => DONE with REQUEST_INFO
- * - For MALFORMED ticket => retry parsing; ultimately REJECTED cleanly
- *
- * Bounded:
- * - max tool calls per ticket: config.maxToolCalls
- * - max LLM attempts per ticket: config.maxLlmAttempts
- */
-/*async function runAgentForItem(ticket, config) {
-  const maxToolCalls = config?.maxToolCalls ?? 3;
-  const maxLlmAttempts = config?.maxLlmAttempts ?? 3;
-
-  const plan = [];
-  const tool_calls = [];
-  const safety = { blocked: false, reasons: [] };
-
-  // TODO 1: prompt injection detection
-  // If detected: return REJECTED before calling LLM or tools.
-
-  // TODO 2: build initial messages array
-  // Must include system + user message
-  const messages = [];
-
-  // TODO 3: agent loop (attempts bounded)
-  // - call mockLlm(messages)
-  // - safeParse
-  // - validateLlmResponse
-  // - if tool_call:
-  //    - enforce allowlist
-  //    - execute tool
-  //    - push TOOL_RESULT: ... into messages
-  // - if final: return DONE with final
-  // - if malformed JSON: retry with stricter system message once (within max attempts)
-
-  return {
-    id: ticket.id,
-    status: "REJECTED",
-    plan: ["Not implemented"],
-    tool_calls: [],
-    final: { action: "REFUSE", payload: { reason: "Not implemented" } },
-    safety
-  };
-}
-
-module.exports = {
-  runAgentForItem
-};*/
