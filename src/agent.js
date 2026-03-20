@@ -46,10 +46,9 @@ async function runAgentForItem(ticket, config) {
   // 3. Agent Loop
   while (attempts < maxLlmAttempts) {
     const llmRaw = await mockLlm(messages);
-
     const parsed = safeParse(llmRaw);
 
-    // Retry if JSON malformed
+    // Retry if malformed JSON
     if (!parsed.ok) {
       attempts++;
       continue;
@@ -57,6 +56,7 @@ async function runAgentForItem(ticket, config) {
 
     const validation = validateLlmResponse(parsed.value);
 
+    // Invalid schema → reject
     if (!validation.ok) {
       return {
         id: ticket.id,
@@ -71,11 +71,11 @@ async function runAgentForItem(ticket, config) {
       };
     }
 
-    // TOOL CALL HANDLING
+    // TOOL CALL
     if (validation.type === "tool_call") {
       const { tool, args } = parsed.value;
 
-      // Allowlist check
+      // Check allowlist
       if (!enforceToolAllowlist(tool, ticket.context.allowed_tools)) {
         return {
           id: ticket.id,
@@ -90,7 +90,7 @@ async function runAgentForItem(ticket, config) {
         };
       }
 
-      // Tool call limit check
+      // Limit tool calls
       if (toolCallCount >= maxToolCalls) {
         return {
           id: ticket.id,
@@ -111,11 +111,12 @@ async function runAgentForItem(ticket, config) {
         tool_calls.push({ tool, args });
         toolCallCount++;
 
-        // Feed tool result back to LLM
+        // 🔥 IMPORTANT: Feed result back to LLM
         messages.push({
           role: "assistant",
           content: `TOOL_RESULT: ${JSON.stringify(result)}`
         });
+
       } catch (error) {
         return {
           id: ticket.id,
