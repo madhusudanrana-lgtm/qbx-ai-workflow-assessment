@@ -21,7 +21,7 @@ async function runAgentForItem(ticket, config) {
   const tool_calls = [];
   const safety = { blocked: false, reasons: [] };
 
-  // 🔒 Prompt Injection Check
+  // 🔒 Prompt Injection
   const injection = detectPromptInjection(ticket.user_request);
   if (injection.length > 0) {
     return {
@@ -49,7 +49,7 @@ async function runAgentForItem(ticket, config) {
     const llmRaw = await mockLlm(messages);
     const parsed = safeParse(llmRaw);
 
-    // Retry if JSON invalid
+    // 🔁 Retry if invalid JSON
     if (!parsed.ok) {
       attempts++;
       continue;
@@ -75,7 +75,6 @@ async function runAgentForItem(ticket, config) {
     if (validation.type === "tool_call") {
       const { tool, args } = parsed.value;
 
-      // Allowlist check
       if (!enforceToolAllowlist(tool, ticket.context.allowed_tools)) {
         return {
           id: ticket.id,
@@ -90,7 +89,6 @@ async function runAgentForItem(ticket, config) {
         };
       }
 
-      // Tool limit check
       if (toolCallCount >= maxToolCalls) {
         return {
           id: ticket.id,
@@ -110,13 +108,14 @@ async function runAgentForItem(ticket, config) {
       tool_calls.push({ tool, args });
       toolCallCount++;
 
-      // 🔥 CRITICAL STEP → enables final response
       messages.push({
         role: "assistant",
         content: `TOOL_RESULT: ${JSON.stringify(result)}`
       });
 
-      // Do NOT increment attempts here (important fix)
+      // 🔥 CRITICAL FIX
+      attempts++;
+
       continue;
     }
 
@@ -133,7 +132,7 @@ async function runAgentForItem(ticket, config) {
     }
   }
 
-  // ❌ If max attempts reached
+  // ❌ fallback
   return {
     id: ticket.id,
     status: "REJECTED",
