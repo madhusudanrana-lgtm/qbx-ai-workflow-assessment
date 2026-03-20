@@ -1,8 +1,5 @@
 const { isValidToolCall, isValidFinal } = require("./llm/schema");
 
-/**
- * Detect prompt injection patterns
- */
 function detectPromptInjection(text) {
   const patterns = [
     /ignore previous instructions/i,
@@ -15,16 +12,10 @@ function detectPromptInjection(text) {
   return detected ? ["PROMPT_INJECTION"] : [];
 }
 
-/**
- * Enforce tool allowlist
- */
 function enforceToolAllowlist(toolName, allowedTools) {
   return Array.isArray(allowedTools) && allowedTools.includes(toolName);
 }
 
-/**
- * Validate LLM response schema
- */
 function validateLlmResponse(obj) {
   if (isValidToolCall(obj)) return { ok: true, type: "tool_call" };
   if (isValidFinal(obj)) return { ok: true, type: "final" };
