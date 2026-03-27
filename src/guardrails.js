@@ -3,7 +3,7 @@ const { isValidToolCall, isValidFinal } = require("./llm/schema");
 function detectPromptInjection(text) {
   const patterns = [
     /ignore previous instructions/i,
-    /reveal secrets/i,
+    
     /override policy/i,
     /send confidential/i
   ];
